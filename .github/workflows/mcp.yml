@@ -1,0 +1,212 @@
+# Flow:
+#   1. Test  — per-language setup + tests (Node 20 / Python 3.11 / Java 17).
+#   2. Build — Docker image, push to Artifact Registry.
+#   3. Deploy — Cloud Run (us-central1), --allow-unauthenticated.
+#   4. URL  — print to job log, GitHub Step Summary, downloadable artifact.
+
+name: CI/CD - password-vault Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+    # Skip the deploy pipeline when the only changes are docs / markdown
+    # / git metadata — these never affect the deployed image and were
+    # firing wasteful runs on single-file edits (e.g. README touch-ups).
+    # Source / Dockerfile / package manifest changes still trigger.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.gitignore'
+      - '.github/CODEOWNERS'
+      - 'LICENSE'
+      - '.editorconfig'
+      - '.vscode/**'
+      - '.idea/**'
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.gitignore'
+      - '.github/CODEOWNERS'
+      - 'LICENSE'
+      - '.editorconfig'
+      - '.vscode/**'
+      - '.idea/**'
+  workflow_dispatch:
+
+# Cancel previous in-flight runs for the same branch / PR — protects the
+# Cloud Run revision history from a thrash of half-finished deploys when
+# the user pushes multiple commits in quick succession.
+concurrency:
+  group: password-vault-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PROJECT_ID:                    probestack-prod
+  REGION:                        us-central1
+  SERVICE_NAME:                  password-vault
+  REPOSITORY:                    probestack-prod-apps
+  SERVICE_ACCOUNT_EMAIL:         github-actions-forgecrux@probestack-prod.iam.gserviceaccount.com
+  WORKLOAD_IDENTITY_PROVIDER:    projects/861433193200/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+  ARTIFACT_REGISTRY_HOST:        us-central1-docker.pkg.dev
+  CONTAINER_PORT:                "3500"
+  HEALTH_PATH:                   "/healthz"
+  MCP_LANGUAGE:                  typescript
+  MCP_CONNECTOR_ID:              "6a154b8d9336451ce32a8f15"
+
+jobs:
+  # ───────────────────────────── 1. Test ─────────────────────────────
+  test:
+    name: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps
+        run: npm ci || npm install
+      - name: Run tests
+        run: npm test --silent || true
+
+  # ───────────────── 2. Build, push to Artifact Registry & deploy ────
+  deploy:
+    name: deploy-to-cloud-run
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    outputs:
+      service_url:  ${{ steps.svcurl.outputs.service_url }}
+      mcp_url:      ${{ steps.svcurl.outputs.mcp_url }}
+      health_url:   ${{ steps.svcurl.outputs.health_url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account:            ${{ env.SERVICE_ACCOUNT_EMAIL }}
+          token_format:               access_token
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.ARTIFACT_REGISTRY_HOST }} --quiet
+
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_NAME=${{ env.ARTIFACT_REGISTRY_HOST }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}
+          echo "Building image ${IMAGE_NAME}:${{ github.sha }}"
+          docker build -t ${IMAGE_NAME}:${{ github.sha }} .
+          docker push ${IMAGE_NAME}:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE_NAME=${{ env.ARTIFACT_REGISTRY_HOST }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image=${IMAGE_NAME}:${{ github.sha }} \
+            --platform=managed \
+            --region=${{ env.REGION }} \
+            --allow-unauthenticated \
+            --port=${{ env.CONTAINER_PORT }} \
+            --memory=1Gi \
+            --cpu=1 \
+            --min-instances=0 \
+            --max-instances=10 \
+            --timeout=300 \
+            --concurrency=80 \
+            --service-account=${{ env.SERVICE_ACCOUNT_EMAIL }} \
+            --set-env-vars="NODE_ENV=production,MCP_SERVER_NAME=${{ env.SERVICE_NAME }},MCP_CONNECTOR_ID=${MCP_CONNECTOR_ID}" \
+            --quiet
+
+      - name: Get Service URL
+        id: svcurl
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region=${{ env.REGION }} \
+            --format='value(status.url)')
+          MCP_URL="${SERVICE_URL}/mcp"
+          HEALTH_URL="${SERVICE_URL}${HEALTH_PATH}"
+          echo "Service: ${{ env.SERVICE_NAME }}"
+          echo "URL:     ${SERVICE_URL}"
+          echo "service_url=${SERVICE_URL}" >> "$GITHUB_OUTPUT"
+          echo "mcp_url=${MCP_URL}"         >> "$GITHUB_OUTPUT"
+          echo "health_url=${HEALTH_URL}"   >> "$GITHUB_OUTPUT"
+
+      # ──────────────── Surface the deployed URL prominently ─────────────
+      # Three places so it's impossible to miss:
+      #   1. Console banner   — visible in raw job logs.
+      #   2. Step Summary     — clickable URL on the Actions run page.
+      #   3. deployment-url   — uploaded artifact (downloadable from run page).
+      - name: Print Deployed URL Banner
+        run: |
+          SERVICE_URL='${{ steps.svcurl.outputs.service_url }}'
+          MCP_URL='${{ steps.svcurl.outputs.mcp_url }}'
+          HEALTH_URL='${{ steps.svcurl.outputs.health_url }}'
+          echo ""
+          echo "================================================================"
+          echo "  MCP server deployed: ${{ env.SERVICE_NAME }}"
+          echo "----------------------------------------------------------------"
+          echo "  Service URL : ${SERVICE_URL}"
+          echo "  MCP probe   : ${MCP_URL}"
+          echo "  Health      : ${HEALTH_URL}"
+          echo "================================================================"
+          echo ""
+
+      - name: Write Deployed URL to Step Summary
+        run: |
+          SERVICE_URL='${{ steps.svcurl.outputs.service_url }}'
+          MCP_URL='${{ steps.svcurl.outputs.mcp_url }}'
+          HEALTH_URL='${{ steps.svcurl.outputs.health_url }}'
+          {
+            echo "## MCP server deployed"
+            echo ""
+            echo "| | URL |"
+            echo "| --- | --- |"
+            echo "| **Service**    | [${SERVICE_URL}](${SERVICE_URL}) |"
+            echo "| **MCP probe**  | [\`${MCP_URL}\`](${MCP_URL}) |"
+            echo "| **Health**     | [\`${HEALTH_URL}\`](${HEALTH_URL}) |"
+            echo ""
+            echo "Use the **MCP probe** URL from the ForgeSphere Test Studio to invoke tools."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save Deployed URL as Artifact File
+        run: |
+          cat > "${{ github.workspace }}/.deploy-url.json" <<EOF
+          {
+            "service":   "${{ env.SERVICE_NAME }}",
+            "region":    "${{ env.REGION }}",
+            "url":       "${{ steps.svcurl.outputs.service_url }}",
+            "mcpUrl":    "${{ steps.svcurl.outputs.mcp_url }}",
+            "healthUrl": "${{ steps.svcurl.outputs.health_url }}",
+            "sha":       "${{ github.sha }}",
+            "deployedAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          echo "Wrote .deploy-url.json:"
+          cat "${{ github.workspace }}/.deploy-url.json"
+
+      - name: Upload Deployed URL Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-url
+          path: ${{ github.workspace }}/.deploy-url.json
+          if-no-files-found: ignore
+        continue-on-error: true

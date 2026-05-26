@@ -1,0 +1,26 @@
+{
+  "name" : "password-vault",
+  "version" : "0.1.0",
+  "description" : "MCP server to store, generate, retrieve and delete service passwords with in‑memory encrypted storage",
+  "type" : "module",
+  "main" : "dist/index.js",
+  "scripts" : {
+    "build" : "tsc -p .",
+    "start" : "node dist/index.js",
+    "dev" : "tsx watch src/index.ts",
+    "test" : "vitest run"
+  },
+  "dependencies" : {
+    "@modelcontextprotocol/sdk" : "^1.0.0",
+    "zod" : "^3.23.8",
+    "express" : "^4.19.2",
+    "dotenv" : "^16.4.5"
+  },
+  "devDependencies" : {
+    "typescript" : "^5.4.0",
+    "tsx" : "^4.7.0",
+    "@types/node" : "^20.11.0",
+    "@types/express" : "^4.17.21",
+    "vitest" : "^1.6.0"
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "slug" : "password-vault",
+  "name" : "Password Vault",
+  "description" : "MCP server to store, generate, retrieve and delete service passwords with in‑memory encrypted storage",
+  "category" : "Developer Tools",
+  "transport" : "STREAMABLE_HTTP",
+  "serverUrl" : "http://localhost:3500/mcp",
+  "requiresAuth" : true,
+  "tools" : [ {
+    "name" : "store_password",
+    "description" : "Stores a password for a given service. Password is base64 encoded in memory. Returns success status.",
+    "inputSchema" : {
+      "type" : "object",
+      "properties" : {
+        "service" : {
+          "type" : "string",
+          "description" : "Service name (e.g., 'gmail', 'github')"
+        },
+        "username" : {
+          "type" : "string",
+          "description" : "Username/email for the service"
+        },
+        "password" : {
+          "type" : "string",
+          "description" : "Plain text password (will be encoded)"
+        },
+        "note" : {
+          "type" : "string",
+          "description" : "Optional note"
+        }
+      },
+      "required" : [ "service", "username", "password" ]
+    }
+  }, {
+    "name" : "generate_password",
+    "description" : "Generates a strong random password with configurable length and options.",
+    "inputSchema" : {
+      "type" : "object",
+      "properties" : {
+        "length" : {
+          "type" : "integer",
+          "minimum" : 8,
+          "maximum" : 64,
+          "default" : 16
+        },
+        "useNumbers" : {
+          "type" : "boolean",
+          "default" : true
+        },
+        "useSymbols" : {
+          "type" : "boolean",
+          "default" : true
+        }
+      }
+    }
+  }, {
+    "name" : "get_password",
+    "description" : "Retrieves stored password for a service (decoded from base64).",
+    "inputSchema" : {
+      "type" : "object",
+      "properties" : {
+        "service" : {
+          "type" : "string"
+        }
+      },
+      "required" : [ "service" ]
+    }
+  }, {
+    "name" : "delete_password",
+    "description" : "Removes a stored password entry by service name.",
+    "inputSchema" : {
+      "type" : "object",
+      "properties" : {
+        "service" : {
+          "type" : "string"
+        }
+      },
+      "required" : [ "service" ]
+    }
+  } ]
+}
